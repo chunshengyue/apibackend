@@ -94,17 +94,27 @@ def ocr_endpoint(
     if config.API_SECRET and x_api_secret != config.API_SECRET:
         raise HTTPException(status_code=403, detail="Invalid API Secret")
 
-    # 退回舊版：使用 check_limit
-    if not limiter.check_limit(x_device_id):
-        raise HTTPException(status_code=429, detail="Too Many Requests")
+    # 💡 1. 只检查是否有资格，不扣额度
+    if not limiter.can_request(x_device_id):
+        return {
+            "error": True,
+            "error_code": 429,
+            "error_msg": "Too Many Requests or Quota Exceeded",
+            "suggestion": "今日免费识别额度已用完，请明天再来尝试"
+        }
 
     if not image:
         raise HTTPException(status_code=400, detail="Image is required")
 
+    # 💡 2. 调用百度 OCR 策略
     result = strategy.execute_strategy(image, force_mode)
 
+    # 💡 3. 如果百度报错了（没额度或QPS超了），直接原样返回，不调用记录成功的函数
     if result.get("error"):
         return result
+
+    # 💡 4. 万事大吉！只有百度真实返回了成功数据，才去 Redis 里把次数 +1
+    limiter.record_success(x_device_id)
 
     parsed_str = ""
     if "tables_result" in result:
