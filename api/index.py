@@ -2,7 +2,7 @@ from fastapi import FastAPI, Header, HTTPException, Form
 from pydantic import BaseModel
 import sys
 import os
-import re  # 💡 必須引入正則表達式模組
+import re
 
 # 將當前檔案所在的目錄加入到 Python 的搜尋路徑中
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -18,7 +18,7 @@ class OcrRequest(BaseModel):
 
 
 # ==========================================
-# 💡 必須將你之前寫的兩個解析函數貼在這裡！
+# 解析函數
 # ==========================================
 def parse_baidu_table(json_data):
     if "tables_result" not in json_data or not json_data["tables_result"]: return None
@@ -72,15 +72,13 @@ def parse_baidu_general(json_data):
                 output_lines.append(" ".join(texts))
         return "\n".join(output_lines)
 
-    # 模式2 (無位置版) 兜底：用空格拼接，避免全變成換行
     texts = [w["words"].strip() for w in words_list]
     return " ".join(texts)
 
 
 # ==========================================
-# API 路由區
+# API 路由
 # ==========================================
-
 @app.get("/")
 def home():
     return {"status": "running", "service": "OCR-Backend"}
@@ -96,27 +94,17 @@ def ocr_endpoint(
     if config.API_SECRET and x_api_secret != config.API_SECRET:
         raise HTTPException(status_code=403, detail="Invalid API Secret")
 
-    # 💡 1. 只检查是否有资格，不扣额度
-    if not limiter.can_request(x_device_id):
-        return {
-            "error": True,
-            "error_code": 429,
-            "error_msg": "Too Many Requests or Quota Exceeded",
-            "suggestion": "今日免费识别额度已用完，请明天再来尝试"
-        }
+    # 退回舊版：使用 check_limit
+    if not limiter.check_limit(x_device_id):
+        raise HTTPException(status_code=429, detail="Too Many Requests")
 
     if not image:
         raise HTTPException(status_code=400, detail="Image is required")
 
-    # 💡 2. 调用百度 OCR 策略
     result = strategy.execute_strategy(image, force_mode)
 
-    # 💡 3. 如果百度报错了（没额度或QPS超了），直接原样返回，不调用记录成功的函数
     if result.get("error"):
         return result
-
-    # 💡 4. 万事大吉！只有百度真实返回了成功数据，才去 Redis 里把次数 +1
-    limiter.record_success(x_device_id)
 
     parsed_str = ""
     if "tables_result" in result:
