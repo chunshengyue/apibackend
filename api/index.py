@@ -1,81 +1,120 @@
 from fastapi import FastAPI, Header, HTTPException, Form
-
 from pydantic import BaseModel
 import sys
 import os
+import re  # 💡 必須引入正則表達式模組
 
-# 💡 新增這兩行：將當前檔案所在的目錄 (即 api/) 加入到 Python 的搜尋路徑中
+# 將當前檔案所在的目錄加入到 Python 的搜尋路徑中
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import strategy
-
 import limiter
-
 import config
-
-
 
 app = FastAPI()
 
 
-
-
-
 class OcrRequest(BaseModel):
-
-    image: str  # Base64 字符串
-
+    image: str
 
 
+# ==========================================
+# 💡 必須將你之前寫的兩個解析函數貼在這裡！
+# ==========================================
+def parse_baidu_table(json_data):
+    if "tables_result" not in json_data or not json_data["tables_result"]: return None
+    table = json_data["tables_result"][0]
+    body = table.get("body", [])
+    rows_map = {}
+    for cell in body:
+        r, c, w = cell["row_start"], cell["col_start"], cell["words"]
+        w = w.replace("\n", "").strip().replace("小红书", "")
+        if r not in rows_map: rows_map[r] = {}
+        rows_map[r][c] = w
+    output_lines = []
+    for r_idx in sorted(rows_map.keys()):
+        row_data = rows_map[r_idx]
+        col0 = row_data.get(0, "")
+        if not re.match(r'^\d+', col0): continue
+        actions = [row_data.get(c, "Wait") for c in range(1, 6)]
+        output_lines.append(f"{col0} {' '.join(actions)}")
+    return "\n".join(output_lines)
 
+
+def parse_baidu_general(json_data):
+    if "words_result" not in json_data: return None
+    words_list = json_data["words_result"]
+    if not words_list: return ""
+    if "location" in words_list[0]:
+        total_height = sum([w['location']['height'] for w in words_list])
+        row_threshold = (total_height / len(words_list)) * 0.6
+        sorted_words = sorted(words_list, key=lambda x: x["location"]["top"])
+        rows = []
+        current_row = []
+        current_row_top = 0
+        for item in sorted_words:
+            top = item["location"]["top"]
+            if not current_row:
+                current_row.append(item)
+                current_row_top = top
+            else:
+                if abs(top - current_row_top) < row_threshold:
+                    current_row.append(item)
+                else:
+                    rows.append(current_row)
+                    current_row = [item]
+                    current_row_top = top
+        if current_row: rows.append(current_row)
+        output_lines = []
+        for row in rows:
+            row.sort(key=lambda x: x["location"]["left"])
+            texts = [x["words"].replace("\n", "").strip() for x in row]
+            if re.match(r'^第?\d+', texts[0] if texts else ""):
+                output_lines.append(" ".join(texts))
+        return "\n".join(output_lines)
+
+    # 模式2 (無位置版) 兜底：用空格拼接，避免全變成換行
+    texts = [w["words"].strip() for w in words_list]
+    return " ".join(texts)
+
+
+# ==========================================
+# API 路由區
+# ==========================================
 
 @app.get("/")
-
 def home():
-
     return {"status": "running", "service": "OCR-Backend"}
-
-
-
 
 
 @app.post("/ocr")
 def ocr_endpoint(
-        image: str = Form(...),  # 接收 Form-Data 中的 image 字段
-        force_mode: int = Form(None),  # 💡 新增：接收測試模式參數
-        x_device_id: str = Header(None, alias="X-Device-ID"),  # 从 Header 读取
-        x_api_secret: str = Header(None, alias="X-Api-Secret")  # 简单鉴权
+        image: str = Form(...),
+        force_mode: int = Form(None),
+        x_device_id: str = Header(None, alias="X-Device-ID"),
+        x_api_secret: str = Header(None, alias="X-Api-Secret")
 ):
-    # 1. 简单鉴权 (防止被扫描)
     if config.API_SECRET and x_api_secret != config.API_SECRET:
         raise HTTPException(status_code=403, detail="Invalid API Secret")
 
-    # 2. 限流检查
     if not limiter.check_limit(x_device_id):
         raise HTTPException(status_code=429, detail="Too Many Requests")
 
-    # 3. 执行策略
     if not image:
         raise HTTPException(status_code=400, detail="Image is required")
 
-    # 💡 修改：將 force_mode 傳遞給策略函式
     result = strategy.execute_strategy(image, force_mode)
 
-    # 💡 检查是否发生了拦截或降级失败的错误
     if result.get("error"):
         return result
 
-    # 4. 如果成功，执行数据清洗 (这里调用你之前写的 parse_baidu_table 等函数)
     parsed_str = ""
     if "tables_result" in result:
         parsed_str = parse_baidu_table(result)
     elif "words_result" in result:
         parsed_str = parse_baidu_general(result)
 
-    # 5. 返回标准化的成功格式给安卓端
     return {
         "status": "success",
         "_strategy_used": result.get("_strategy_used"),
         "parsed_text": parsed_str
     }
-
-
