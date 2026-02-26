@@ -1,7 +1,11 @@
 from fastapi import FastAPI, Header, HTTPException, Form
 
 from pydantic import BaseModel
+import sys
+import os
 
+# 💡 新增這兩行：將當前檔案所在的目錄 (即 api/) 加入到 Python 的搜尋路徑中
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import strategy
 
 import limiter
