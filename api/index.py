@@ -60,6 +60,22 @@ def ocr_endpoint(
     # 💡 修改：將 force_mode 傳遞給策略函式
     result = strategy.execute_strategy(image, force_mode)
 
-    return result
+    # 💡 检查是否发生了拦截或降级失败的错误
+    if result.get("error"):
+        return result
+
+    # 4. 如果成功，执行数据清洗 (这里调用你之前写的 parse_baidu_table 等函数)
+    parsed_str = ""
+    if "tables_result" in result:
+        parsed_str = parse_baidu_table(result)
+    elif "words_result" in result:
+        parsed_str = parse_baidu_general(result)
+
+    # 5. 返回标准化的成功格式给安卓端
+    return {
+        "status": "success",
+        "_strategy_used": result.get("_strategy_used"),
+        "parsed_text": parsed_str
+    }
 
 
